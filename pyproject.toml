@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "firefly-ik"
+version = "0.1.0"
+description = "Offline Pinocchio FK/IK for the Firefly Y640 dual-arm workcell"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "pin==3.9.0",
+    "numpy>=2.2,<2.3",
+    "scipy>=1.14,<1.16",
+    # Pinocchio 3.9 wheels link to these ABI versions; upstream lower bounds
+    # otherwise allow incompatible urdfdom 6 / tinyxml2 11 wheels.
+    "cmeel-urdfdom==4.0.1",
+    "cmeel-tinyxml2==10.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[project.scripts]
+firefly-ik = "firefly_ik.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

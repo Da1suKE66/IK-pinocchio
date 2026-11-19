@@ -5,7 +5,3 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
-.runtime/
-/firefly-sim-ik-linux-x86_64.tar.gz
-/firefly-sim-ik/runs/
-/configs/firefly_hardware.local.json
