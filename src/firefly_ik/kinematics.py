@@ -297,7 +297,15 @@ class FireflyIK:
             # Near a wrist pole, a small orientation error can move the computed
             # planar point past an elbow tangency. Check the original 6D pose.
             residual, jacobian = self._task(arm, world, initial, False, .2)
-            for start in (origin, (lower + upper) / 2):
+            starts = [origin, (lower + upper) / 2]
+            # Wrist phase can also push a valid branch just beyond an actuator
+            # stop. Its projection is a local seed for the original bounded 6D
+            # problem, even when the home and midpoint converge to another elbow.
+            limited = [np.asarray(r["q_rad"]) for r in rejected if r["reason"] == "joint_limits"]
+            if limited:
+                closest = min(limited, key=lambda q: np.linalg.norm(q - np.clip(q, lower, upper)))
+                starts.insert(0, np.clip(closest, lower, upper))
+            for start in starts:
                 q = _bounded_fit(residual, jacobian, start, lower, upper, 300).x
                 checked, valid = verify(q)
                 if valid:

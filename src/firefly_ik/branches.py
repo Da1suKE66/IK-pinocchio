@@ -41,6 +41,20 @@ def angle_values(angle, lower, upper):
     return [float(np.clip(angle + TAU * k, lower, upper)) for k in range(first, last + 1)]
 
 
+def circle_pitches(center, offset, radius):
+    """Solve |center − Ry(pitch) offset| = radius in the XZ plane."""
+    x = center @ offset
+    y = center[0] * offset[1] - center[1] * offset[0]
+    amplitude = np.hypot(x, y)
+    if amplitude < 1e-16:
+        return ()
+    cosine = (center @ center + offset @ offset - radius**2) / (2 * amplitude)
+    if abs(cosine) > 1 + EPS:
+        return ()
+    origin, span = np.arctan2(y, x), np.arccos(np.clip(cosine, -1., 1.))
+    return (origin - span, origin + span)
+
+
 def wrist_family_pitches(center, p3, p4, tool, phase, bend, lower, upper, seed_pitch):
     """Split the J6 phase interval wherever elbow reach or a planar joint stop changes feasibility."""
     def rotate(v, p):
@@ -50,16 +64,8 @@ def wrist_family_pitches(center, p3, p4, tool, phase, bend, lower, upper, seed_p
     low, high = sorted(phase - np.sign(bend) * np.array([lower[5], upper[5]]))
     edges = [low, high]
     def circle_intersections(w, a, radius):
-        # |w - Ry(p) a| = radius gives A cos(p) + B sin(p) = C in the XZ plane.
-        x, y = w @ a, w[0] * a[1] - w[1] * a[0]
-        amplitude = np.hypot(x, y)
-        if amplitude < 1e-16:
-            return
-        cosine = (w @ w + a @ a - radius**2) / (2 * amplitude)
-        if abs(cosine) <= 1 + EPS:
-            origin, span = np.arctan2(y, x), np.arccos(np.clip(cosine, -1., 1.))
-            for root in (origin - span, origin + span):
-                edges.extend(angle_values(root, low, high))
+        for root in circle_pitches(w, a, radius):
+            edges.extend(angle_values(root, low, high))
 
     l3, l4 = np.linalg.norm(p3), np.linalg.norm(p4)
     for radius in (abs(l3 - l4), l3 + l4):
@@ -85,6 +91,8 @@ def planar_branches(flange, offsets, lower, upper, *, seed_yaw=None, seed_pitch=
     sensitive_wrist = False
     p1, p2, p3, p4, p5, p6 = offsets
     length1, length2 = np.linalg.norm(p3), np.linalg.norm(p4)
+    reach = (abs(length1 - length2), length1 + length2)
+    tool = p5 + np.array([p6[0], 0., 0.])
     if min(length1, length2) < EPS:
         raise ValueError("full-pose enumeration requires two nonzero planar arm lengths")
     tilt1, tilt2 = np.arctan2(p3[0], p3[2]), np.arctan2(p4[0], p4[2])
@@ -107,6 +115,7 @@ def planar_branches(flange, offsets, lower, upper, *, seed_yaw=None, seed_pitch=
     for yaw in np.unique(yaws):
         rz = pin.rpy.rpyToMatrix(0., 0., yaw)
         local_rotation = rz.T @ flange.rotation
+        center = rz.T @ wrist - p2
         direction = local_rotation[:, 2]
         radial = np.hypot(direction[0], direction[2])
         # atan2 of the two small components is ill-conditioned well before
@@ -123,28 +132,39 @@ def planar_branches(flange, offsets, lower, upper, *, seed_yaw=None, seed_pitch=
                 singular.append("wrist_pitch_underdetermined")
                 combined = local_rotation @ pin.rpy.rpyToMatrix(bend, 0., 0.)
                 phase = np.arctan2(combined[0, 2], combined[0, 0])
-                center = (rz.T @ wrist - p2)[[0, 2]]
-                tool = (p5 + [p6[0], 0., 0.])[[0, 2]]
-                pitches = wrist_family_pitches(center, p3[[0, 2]], p4[[0, 2]], tool,
+                pitches = wrist_family_pitches(center[[0, 2]], p3[[0, 2]], p4[[0, 2]], tool[[0, 2]],
                                                phase, bend, lower, upper, seed_pitch)
                 wrist_angles.extend((bend, pitch) for pitch in pitches)
         for bend, pitch in wrist_angles:
             if not angle_values(bend, lower[4], upper[4]):
                 continue
             ry = pin.rpy.rpyToMatrix(0., pitch, 0.)
-            rx = pin.rpy.rpyToMatrix(-bend, 0., 0.)
-            wrist_rotation = (rz @ ry @ rx).T @ flange.rotation
-            roll = np.arctan2(wrist_rotation[1, 0], wrist_rotation[0, 0])
-            point = rz.T @ wrist - p2 - ry @ (p5 + np.array([p6[0], 0., 0.]))
+            point = center - ry @ tool
             radius = np.hypot(point[0], point[2])
             cosine = (radius**2 - length1**2 - length2**2) / (2 * length1 * length2)
             if abs(cosine) > 1 + 1e-12:
-                rejected.append({"reason": "outside_planar_reach", "yaw_rad": float(yaw),
-                                 "radius_m": float(radius), "reach_m": [abs(length1-length2), length1+length2]})
-                continue
+                # Near a wrist pole the two rotation entries used to infer pitch
+                # can both be tiny. Recover pitch from the elbow reach boundary
+                # if this explains the original flange axis to roundoff.
+                boundary = reach[1] if cosine > 0 else reach[0]
+                roots = circle_pitches(center[[0, 2]], tool[[0, 2]], boundary)
+                tangent = min(roots, key=lambda p: abs(np.sin((p - pitch) / 2)), default=None)
+                if tangent is None or 2 * radial * abs(np.sin((tangent - pitch) / 2)) > 1e-12:
+                    rejected.append({"reason": "outside_planar_reach", "yaw_rad": float(yaw),
+                                     "radius_m": float(radius), "reach_m": list(reach)})
+                    continue
+                pitch = tangent
+                ry = pin.rpy.rpyToMatrix(0., pitch, 0.)
+                point = center - ry @ tool
+                radius = boundary
+                cosine = np.copysign(1., cosine)
+                singular.append("ill_conditioned_elbow_tangency")
             if radius < 1e-12:
                 singular.append("folded_shoulder_underdetermined")
                 continue
+            rx = pin.rpy.rpyToMatrix(-bend, 0., 0.)
+            wrist_rotation = (rz @ ry @ rx).T @ flange.rotation
+            roll = np.arctan2(wrist_rotation[1, 0], wrist_rotation[0, 0])
             elbow = np.arccos(np.clip(cosine, -1., 1.))
             for angle in (elbow, -elbow):
                 shoulder = (np.arctan2(point[0], point[2]) - tilt1
